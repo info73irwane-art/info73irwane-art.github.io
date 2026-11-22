@@ -56,24 +56,78 @@ function WishImg({ src, width, ...rest }: { src: string; width: number } & React
   return <img loading="lazy" decoding="async" {...rest} src={url} alt="" onError={() => setFailed(true)} />;
 }
 
-// عارض الصور داخل التطبيق: تكبير، وتنقل بالسحب أو بالأسهم
+// عارض الصور داخل التطبيق: تكبير (قرص بإصبعين، نقرتان، عجلة الفأرة، أزرار)، سحب، وتنقل بين الصور
+type Zoom = { s: number; x: number; y: number };
+const MAX_ZOOM = 5;
+
 function ImageViewer({ urls, index, onClose }: { urls: string[]; index: number; onClose: () => void }) {
   const [i, setI] = useState(index);
   const [loaded, setLoaded] = useState(false);
-  const touchX = useRef<number | null>(null);
+  const [z, setZ] = useState<Zoom>({ s: 1, x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const zRef = useRef(z);
+  zRef.current = z;
+  const stageRef = useRef<HTMLDivElement>(null);
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const g = useRef<{ sx: number; sy: number; moved: boolean; pinched: boolean; x0: number; y0: number;
+    pinch?: { d0: number; s0: number; mx: number; my: number; x0: number; y0: number } } | null>(null);
+  const lastTap = useRef(0);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   const many = urls.length > 1;
-  const go = (d: number) => { setLoaded(false); setI(p => (p + d + urls.length) % urls.length); };
+
+  // زر الرجوع في الهاتف يغلق العارض بدل الخروج من التطبيق
+  useEffect(() => {
+    window.history.pushState({ viewer: true }, "");
+    const onPop = () => closeRef.current();
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+  const close = () => window.history.back();
+
+  const clamp = (s: number, x: number, y: number): Zoom => {
+    const el = stageRef.current;
+    const mx = ((s - 1) * (el?.clientWidth || 0)) / 2;
+    const my = ((s - 1) * (el?.clientHeight || 0)) / 2;
+    return { s, x: Math.max(-mx, Math.min(mx, x)), y: Math.max(-my, Math.min(my, y)) };
+  };
+  // تكبير مع إبقاء النقطة (px, py) ثابتة تحت الإصبع/المؤشر
+  const zoomTo = (ns: number, px = 0, py = 0, from: Zoom = zRef.current) => {
+    let s = Math.max(1, Math.min(MAX_ZOOM, ns));
+    if (s < 1.25) s = 1; // قريب من الحجم الطبيعي: نرجع إليه
+    const k = s / from.s;
+    setZ(s === 1 ? { s: 1, x: 0, y: 0 } : clamp(s, px - (px - from.x) * k, py - (py - from.y) * k));
+  };
+  const rel = (cx: number, cy: number) => {
+    const r = stageRef.current!.getBoundingClientRect();
+    return { x: cx - (r.left + r.width / 2), y: cy - (r.top + r.height / 2) };
+  };
+  const go = (d: number) => {
+    setLoaded(false);
+    setZ({ s: 1, x: 0, y: 0 });
+    setI(p => (p + d + urls.length) % urls.length);
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-      else if (many && e.key === "ArrowLeft") go(1);
-      else if (many && e.key === "ArrowRight") go(-1);
+      if (e.key === "Escape") close();
+      else if (e.key === "+" || e.key === "=") zoomTo(zRef.current.s * 1.5);
+      else if (e.key === "-") zoomTo(zRef.current.s / 1.5);
+      else if (many && zRef.current.s === 1 && e.key === "ArrowLeft") go(1);
+      else if (many && zRef.current.s === 1 && e.key === "ArrowRight") go(-1);
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // عجلة الفأرة (تُضاف يدوياً لنمنع تمرير الصفحة خلف العارض)
+    const el = stageRef.current;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const p = rel(e.clientX, e.clientY);
+      zoomTo(zRef.current.s * Math.exp(-e.deltaY * 0.0015), p.x, p.y);
+    };
+    el?.addEventListener("wheel", onWheel, { passive: false });
+    return () => { window.removeEventListener("keydown", onKey); el?.removeEventListener("wheel", onWheel); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [many, onClose]);
+  }, [many]);
 
   // تحميل الصورة التالية والسابقة مسبقاً
   useEffect(() => {
@@ -81,30 +135,102 @@ function ImageViewer({ urls, index, onClose }: { urls: string[]; index: number; 
     [i + 1, i - 1].forEach(j => { const im = new Image(); im.src = imgUrl(urls[(j + urls.length) % urls.length], 1600); });
   }, [i, many, urls]);
 
+  const onDown = (e: React.PointerEvent) => {
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    setDragging(true);
+    const pts = [...pointers.current.values()];
+    if (pts.length === 1) {
+      g.current = { sx: e.clientX, sy: e.clientY, moved: false, pinched: false, x0: zRef.current.x, y0: zRef.current.y };
+    } else if (pts.length === 2 && g.current) {
+      const [a, b] = pts;
+      const m = rel((a.x + b.x) / 2, (a.y + b.y) / 2);
+      g.current.pinched = true;
+      g.current.pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, s0: zRef.current.s, mx: m.x, my: m.y, x0: zRef.current.x, y0: zRef.current.y };
+    }
+  };
+
+  const onMove = (e: React.PointerEvent) => {
+    if (!pointers.current.has(e.pointerId) || !g.current) return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const pts = [...pointers.current.values()];
+    const st = g.current;
+    if (pts.length >= 2 && st.pinch) {
+      const [a, b] = pts;
+      const p = st.pinch;
+      const m = rel((a.x + b.x) / 2, (a.y + b.y) / 2);
+      const s = Math.max(1, Math.min(MAX_ZOOM, (p.s0 * Math.hypot(a.x - b.x, a.y - b.y)) / p.d0));
+      const k = s / p.s0;
+      setZ(s === 1 ? { s: 1, x: 0, y: 0 } : clamp(s, p.mx - (p.mx - p.x0) * k + (m.x - p.mx), p.my - (p.my - p.y0) * k + (m.y - p.my)));
+      st.moved = true;
+    } else if (pts.length === 1) {
+      const dx = e.clientX - st.sx, dy = e.clientY - st.sy;
+      if (Math.abs(dx) + Math.abs(dy) > 8) st.moved = true;
+      if (zRef.current.s > 1) setZ(clamp(zRef.current.s, st.x0 + dx, st.y0 + dy));
+    }
+  };
+
+  const onUp = (e: React.PointerEvent) => {
+    pointers.current.delete(e.pointerId);
+    const st = g.current;
+    if (pointers.current.size === 1 && st) {
+      // بعد القرص بإصبعين يبقى إصبع واحد: نكمل السحب منه
+      const [p] = [...pointers.current.values()];
+      g.current = { sx: p.x, sy: p.y, moved: true, pinched: true, x0: zRef.current.x, y0: zRef.current.y };
+      return;
+    }
+    if (pointers.current.size > 0) return;
+    setDragging(false);
+    g.current = null;
+    if (!st) return;
+    const dx = e.clientX - st.sx, dy = e.clientY - st.sy;
+    if (!st.moved) {
+      const now = Date.now();
+      if (now - lastTap.current < 300) {
+        lastTap.current = 0;
+        const p = rel(e.clientX, e.clientY);
+        zoomTo(zRef.current.s > 1 ? 1 : 2.5, p.x, p.y, zRef.current);
+      } else {
+        lastTap.current = now;
+      }
+      return;
+    }
+    if (st.pinched || zRef.current.s > 1) return;
+    if (many && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) go(dx < 0 ? 1 : -1);
+    else if (dy > 110 && Math.abs(dy) > Math.abs(dx)) close(); // سحب للأسفل يغلق العارض
+  };
+
+  const zoomed = z.s > 1;
   return (
-    <div
-      className="viewer"
-      onClick={onClose}
-      onTouchStart={e => { touchX.current = e.touches[0].clientX; }}
-      onTouchEnd={e => {
-        if (touchX.current === null) return;
-        const dx = e.changedTouches[0].clientX - touchX.current;
-        touchX.current = null;
-        if (many && Math.abs(dx) > 50) go(dx < 0 ? 1 : -1);
-      }}
-    >
-      <div className="viewer-stage">
-        {!loaded && <WishImg key={"s" + i} src={urls[i]} width={300} loading="eager" className="blur" />}
-        <WishImg key={"f" + i} src={urls[i]} width={1600} loading="eager" style={{ opacity: loaded ? 1 : 0 }} onLoad={() => setLoaded(true)} />
+    <div className="viewer">
+      <div
+        ref={stageRef}
+        className={"viewer-stage" + (zoomed ? " zoomed" : "")}
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        onPointerCancel={onUp}
+      >
+        <div
+          className="viewer-zoom"
+          style={{ transform: `translate(${z.x}px, ${z.y}px) scale(${z.s})`, transition: dragging ? "none" : "transform 0.18s ease-out" }}
+        >
+          {!loaded && <WishImg key={"s" + i} src={urls[i]} width={300} loading="eager" draggable={false} className="blur" />}
+          <WishImg key={"f" + i} src={urls[i]} width={1600} loading="eager" draggable={false} style={{ opacity: loaded ? 1 : 0 }} onLoad={() => setLoaded(true)} />
+        </div>
       </div>
-      <button type="button" className="viewer-btn viewer-close" onClick={onClose} aria-label="إغلاق"><X size={22} /></button>
-      {many && (
+      <button type="button" className="viewer-btn viewer-close" onClick={close} aria-label="إغلاق"><X size={22} /></button>
+      <div className="viewer-zoom-btns">
+        <button type="button" className="viewer-btn" onClick={() => zoomTo(z.s * 1.5)} disabled={z.s >= MAX_ZOOM} aria-label="تكبير">+</button>
+        <button type="button" className="viewer-btn" onClick={() => zoomTo(z.s / 1.5)} disabled={!zoomed} aria-label="تصغير">−</button>
+      </div>
+      {many && !zoomed && (
         <>
-          <button type="button" className="viewer-btn viewer-nav prev" onClick={e => { e.stopPropagation(); go(-1); }} aria-label="السابقة"><ChevronRight size={26} /></button>
-          <button type="button" className="viewer-btn viewer-nav next" onClick={e => { e.stopPropagation(); go(1); }} aria-label="التالية"><ChevronLeft size={26} /></button>
-          <span className="viewer-count">{i + 1} / {urls.length}</span>
+          <button type="button" className="viewer-btn viewer-nav prev" onClick={() => go(-1)} aria-label="السابقة"><ChevronRight size={26} /></button>
+          <button type="button" className="viewer-btn viewer-nav next" onClick={() => go(1)} aria-label="التالية"><ChevronLeft size={26} /></button>
         </>
       )}
+      <span className="viewer-count">{many ? `${i + 1} / ${urls.length}` : ""}{zoomed ? `${many ? " · " : ""}${Math.round(z.s * 100)}%` : ""}</span>
     </div>
   );
 }
@@ -314,6 +440,17 @@ export default function Home() {
   const [wishFilter, setWishFilter] = useState<"thinking" | "acquired" | "all">("thinking");
   const [openWish, setOpenWish] = useState<Record<string, boolean>>({});
   const [viewer, setViewer] = useState<{ urls: string[]; index: number } | null>(null);
+  const [pendingImgs, setPendingImgs] = useState<Record<string, string[]>>({});
+  const wishlistRef = useRef<WishItem[]>([]);
+  wishlistRef.current = wishlist;
+
+  // تنبيه عند محاولة إغلاق الصفحة قبل اكتمال رفع الصور
+  useEffect(() => {
+    if (!Object.keys(pendingImgs).length) return;
+    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [pendingImgs]);
   const [showWishForm, setShowWishForm] = usePersistentBool("ui:wishForm", true);
   const [showAddTask, setShowAddTask] = usePersistentBool("ui:addTask", true);
   const [wishForm, setWishForm] = useState({ title: "", details: "" });
@@ -632,17 +769,41 @@ export default function Home() {
     setOpenWish(prev => ({ ...prev, [id]: !prev[id] }));
   }
 
+  // رفع الصور معاً في نفس الوقت (لا واحدة بعد الأخرى)
   async function uploadWishImages(files: PickedFile[]): Promise<string[]> {
-    const urls: string[] = [];
-    for (const f of files) {
+    return Promise.all(files.map(async f => {
       const blob = await compressImage(f.file);
       const ext = blob.type === "image/png" ? "png" : blob.type === "image/webp" ? "webp" : "jpg";
       const path = `${session.user.id}/${crypto.randomUUID()}.${ext}`;
       const { error } = await supabase.storage.from(WISH_BUCKET).upload(path, blob, { contentType: blob.type || "image/jpeg" });
       if (error) throw new Error(error.message);
-      urls.push(supabase.storage.from(WISH_BUCKET).getPublicUrl(path).data.publicUrl);
-    }
-    return urls;
+      return supabase.storage.from(WISH_BUCKET).getPublicUrl(path).data.publicUrl;
+    }));
+  }
+
+  // يُحفظ العنصر فوراً، وتُرفع صوره في الخلفية ثم تُضاف إليه
+  function uploadInBackground(id: string, files: PickedFile[]) {
+    setPendingImgs(p => ({ ...p, [id]: [...(p[id] || []), ...files.map(f => f.preview)] }));
+    uploadWishImages(files)
+      .then(async urls => {
+        const current = wishlistRef.current.find(x => x.id === id);
+        if (!current) { await removeWishImages(urls); return; }
+        const { error } = await supabase.from("wishlist_items")
+          .update({ image_urls: [...(current.image_urls || []), ...urls] }).eq("id", id);
+        if (error) { alert("تعذر حفظ الصور: " + error.message); await removeWishImages(urls); }
+        await loadData();
+      })
+      .catch(err => alert("تعذر رفع الصور: " + (err instanceof Error ? err.message : "")))
+      .finally(() => {
+        const done = new Set(files.map(f => f.preview));
+        setPendingImgs(p => {
+          const rest = (p[id] || []).filter(u => !done.has(u));
+          const n = { ...p };
+          if (rest.length) n[id] = rest; else delete n[id];
+          return n;
+        });
+        files.forEach(f => URL.revokeObjectURL(f.preview));
+      });
   }
 
   async function removeWishImages(urls: string[]) {
@@ -653,29 +814,26 @@ export default function Home() {
   async function addWish(e: React.FormEvent) {
     e.preventDefault();
     if (!wishForm.title.trim() || !session?.user?.id) return;
+    const files = wishFiles;
+    const id = crypto.randomUUID();
     setBusy(true);
-    try {
-      const urls = await uploadWishImages(wishFiles);
-      const { error } = await supabase.from("wishlist_items").insert({
-        title: wishForm.title.trim(),
-        details: wishForm.details.trim() || null,
-        status: "thinking",
-        created_by: session.user.id,
-        image_urls: urls
-      });
-      if (error) {
-        alert("تعذرت الإضافة: " + error.message);
-        await removeWishImages(urls);
-      } else {
-        wishFiles.forEach(f => URL.revokeObjectURL(f.preview));
-        setWishForm({ title: "", details: "" });
-        setWishFiles([]);
-        await loadData();
-      }
-    } catch (err) {
-      alert("تعذر رفع الصور: " + (err instanceof Error ? err.message : ""));
-    }
+    const { error } = await supabase.from("wishlist_items").insert({
+      id,
+      title: wishForm.title.trim(),
+      details: wishForm.details.trim() || null,
+      status: "thinking",
+      created_by: session.user.id,
+      image_urls: []
+    });
     setBusy(false);
+    if (error) {
+      alert("تعذرت الإضافة: " + error.message);
+      return;
+    }
+    setWishForm({ title: "", details: "" });
+    setWishFiles([]);
+    await loadData();
+    if (files.length) uploadInBackground(id, files);
   }
 
   async function toggleAcquired(w: WishItem) {
@@ -711,13 +869,13 @@ export default function Home() {
   async function saveWishEdit(e: React.FormEvent, w: WishItem) {
     e.preventDefault();
     if (!wishEdit.title.trim()) return;
+    const files = wishEditFiles;
     setBusy(true);
-    try {
-      const newUrls = await uploadWishImages(wishEditFiles);
+    {
       const patch: Record<string, string | string[] | null> = {
         title: wishEdit.title.trim(),
         details: wishEdit.details.trim() || null,
-        image_urls: [...wishEdit.images, ...newUrls]
+        image_urls: [...wishEdit.images]
       };
       if (wishEdit.created_date && wishEdit.created_date !== toDateInput(w.created_at)) {
         patch.created_at = fromDateInput(wishEdit.created_date);
@@ -727,23 +885,19 @@ export default function Home() {
         patch.acquired_at = fromDateInput(wishEdit.acquired_date);
       }
       const { data, error } = await supabase.from("wishlist_items").update(patch).eq("id", w.id).select("id");
+      setBusy(false);
       if (error) {
         alert("تعذر الحفظ: " + error.message);
-        await removeWishImages(newUrls);
       } else if (!data || data.length === 0) {
-        alert("لم يتم الحفظ. تأكد من تشغيل سكربت التفكير في Supabase.");
-        await removeWishImages(newUrls);
+        alert("لم يتم الحفظ. حاول مرة أخرى.");
       } else {
-        await removeWishImages(wishEdit.removed);
-        wishEditFiles.forEach(f => URL.revokeObjectURL(f.preview));
+        removeWishImages(wishEdit.removed);
         setEditingWishId(null);
         setWishEditFiles([]);
         await loadData();
+        if (files.length) uploadInBackground(w.id, files);
       }
-    } catch (err) {
-      alert("تعذر رفع الصور: " + (err instanceof Error ? err.message : ""));
     }
-    setBusy(false);
   }
 
   function askDeleteWish(w: WishItem) {
@@ -1741,6 +1895,7 @@ export default function Home() {
                   const editing = editingWishId === w.id;
                   const canDel = isAdmin || (!!session?.user?.id && w.created_by === session.user.id);
                   const imgs = w.image_urls || [];
+                  const pending = pendingImgs[w.id] || [];
                   return (
                     <article className={"task-row" + (acquired ? " is-complete" : "") + (open ? " is-open" : "")} key={w.id}>
                       <div className="task-summary">
@@ -1770,9 +1925,14 @@ export default function Home() {
                             </span>
                             <span>📅 {fmtDate(w.created_at)}</span>
                             {imgs.length > 0 && <span>🖼️ {imgs.length}</span>}
+                            {pending.length > 0 && <span className="uploading-tag">⏳ جارٍ رفع {pending.length} صورة</span>}
                           </div>
                         </div>
-                        {imgs[0] && <WishImg key={imgs[0]} src={imgs[0]} width={120} className="wish-thumb" onClick={() => setViewer({ urls: imgs, index: 0 })} />}
+                        {imgs[0] ? (
+                          <WishImg key={imgs[0]} src={imgs[0]} width={120} className="wish-thumb" onClick={() => setViewer({ urls: imgs, index: 0 })} />
+                        ) : pending[0] ? (
+                          <img src={pending[0]} alt="" className="wish-thumb uploading" />
+                        ) : null}
                         <button type="button" className="chevron-btn" onClick={() => toggleWish(w.id)} aria-label="التفاصيل">
                           <ChevronDown size={18} className={open ? "chev open" : "chev"} />
                         </button>
@@ -1809,12 +1969,15 @@ export default function Home() {
                           ) : (
                             <>
                               {w.details && <p className="task-desc">{w.details}</p>}
-                              {imgs.length > 0 && (
+                              {(imgs.length > 0 || pending.length > 0) && (
                                 <div className="img-thumbs big">
                                   {imgs.map((u, idx) => (
                                     <button type="button" key={u} className="img-thumb" onClick={() => setViewer({ urls: imgs, index: idx })} aria-label="عرض الصورة">
                                       <WishImg src={u} width={300} />
                                     </button>
+                                  ))}
+                                  {pending.map(u => (
+                                    <div key={u} className="img-thumb uploading" title="جارٍ الرفع..."><img src={u} alt="" /></div>
                                   ))}
                                 </div>
                               )}
