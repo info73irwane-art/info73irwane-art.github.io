@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "com.i3lam.tasks",
+        "sha256_cert_fingerprints": ["47:8D:AB:04:F3:59:8F:31:DD:D4:3C:FD:1C:F9:C2:62:05:72:EE:DA:DA:00:B9:62:C6:24:C2:2D:C8:F4:94:90"]
+      }
+    }]
