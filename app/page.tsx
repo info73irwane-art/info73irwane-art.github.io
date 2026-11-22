@@ -6,7 +6,7 @@ import { FIREBASE_VAPID_KEY } from "@/lib/config";
 import { getFcmToken, deleteFcmToken } from "@/lib/fcm";
 import {
   Check, CheckCircle2, Circle, ClipboardList, FolderKanban, Plus,
-  LogOut, RefreshCw, Search, Users, X, CalendarDays, User, Globe, Settings, Edit3, Trash2, RotateCcw, ChevronDown, Printer, FileText, Clock, ShieldCheck, Bell, Lightbulb, Camera, Image as ImageIcon
+  LogOut, RefreshCw, Search, Users, X, CalendarDays, User, Globe, Settings, Edit3, Trash2, RotateCcw, ChevronDown, Printer, FileText, Clock, ShieldCheck, Bell, Lightbulb, Camera, Image as ImageIcon, ChevronLeft, ChevronRight
 } from "lucide-react";
 
 type Profile = { id: string; full_name: string; email: string; avatar_url?: string; role: string; status?: string; password_changed?: boolean };
@@ -38,6 +38,76 @@ type PickedFile = { file: File; preview: string };
 
 const WISH_BUCKET = "wishlist-images";
 const MAX_IMAGES = 5;
+
+// صور Google Drive: نطلب الحجم المناسب فقط (صغير للمصغّرات، كبير للعرض) من خوادم Google السريعة
+function driveId(url: string) {
+  const m = url.match(/[?&]id=([\w-]+)/);
+  return url.includes("drive.google.com") && m ? m[1] : null;
+}
+function imgUrl(url: string, width: number) {
+  const id = driveId(url);
+  return id ? `https://lh3.googleusercontent.com/d/${id}=w${width}` : url;
+}
+
+function WishImg({ src, width, ...rest }: { src: string; width: number } & React.ImgHTMLAttributes<HTMLImageElement>) {
+  const [failed, setFailed] = useState(false);
+  const id = driveId(src);
+  const url = failed && id ? `https://drive.google.com/thumbnail?id=${id}&sz=w${width}` : imgUrl(src, width);
+  return <img loading="lazy" decoding="async" {...rest} src={url} alt="" onError={() => setFailed(true)} />;
+}
+
+// عارض الصور داخل التطبيق: تكبير، وتنقل بالسحب أو بالأسهم
+function ImageViewer({ urls, index, onClose }: { urls: string[]; index: number; onClose: () => void }) {
+  const [i, setI] = useState(index);
+  const [loaded, setLoaded] = useState(false);
+  const touchX = useRef<number | null>(null);
+  const many = urls.length > 1;
+  const go = (d: number) => { setLoaded(false); setI(p => (p + d + urls.length) % urls.length); };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+      else if (many && e.key === "ArrowLeft") go(1);
+      else if (many && e.key === "ArrowRight") go(-1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [many, onClose]);
+
+  // تحميل الصورة التالية والسابقة مسبقاً
+  useEffect(() => {
+    if (!many) return;
+    [i + 1, i - 1].forEach(j => { const im = new Image(); im.src = imgUrl(urls[(j + urls.length) % urls.length], 1600); });
+  }, [i, many, urls]);
+
+  return (
+    <div
+      className="viewer"
+      onClick={onClose}
+      onTouchStart={e => { touchX.current = e.touches[0].clientX; }}
+      onTouchEnd={e => {
+        if (touchX.current === null) return;
+        const dx = e.changedTouches[0].clientX - touchX.current;
+        touchX.current = null;
+        if (many && Math.abs(dx) > 50) go(dx < 0 ? 1 : -1);
+      }}
+    >
+      <div className="viewer-stage">
+        {!loaded && <WishImg key={"s" + i} src={urls[i]} width={300} loading="eager" className="blur" />}
+        <WishImg key={"f" + i} src={urls[i]} width={1600} loading="eager" style={{ opacity: loaded ? 1 : 0 }} onLoad={() => setLoaded(true)} />
+      </div>
+      <button type="button" className="viewer-btn viewer-close" onClick={onClose} aria-label="إغلاق"><X size={22} /></button>
+      {many && (
+        <>
+          <button type="button" className="viewer-btn viewer-nav prev" onClick={e => { e.stopPropagation(); go(-1); }} aria-label="السابقة"><ChevronRight size={26} /></button>
+          <button type="button" className="viewer-btn viewer-nav next" onClick={e => { e.stopPropagation(); go(1); }} aria-label="التالية"><ChevronLeft size={26} /></button>
+          <span className="viewer-count">{i + 1} / {urls.length}</span>
+        </>
+      )}
+    </div>
+  );
+}
 
 // قيمة منطقية تُحفظ في المتصفح (لحفظ حالة الطي/التوسيع)
 function usePersistentBool(key: string, initial: boolean) {
@@ -120,7 +190,7 @@ function ImagePicker({ existing, files, onAdd, onRemoveExisting, onRemoveFile }:
         <div className="img-thumbs">
           {existing.map(url => (
             <div className="img-thumb" key={url}>
-              <img src={url} alt="" />
+              <WishImg src={url} width={200} />
               <button type="button" onClick={() => onRemoveExisting(url)} aria-label="حذف الصورة"><X size={12} /></button>
             </div>
           ))}
@@ -243,6 +313,7 @@ export default function Home() {
   const [showWishlist, setShowWishlist] = useState(false);
   const [wishFilter, setWishFilter] = useState<"thinking" | "acquired" | "all">("thinking");
   const [openWish, setOpenWish] = useState<Record<string, boolean>>({});
+  const [viewer, setViewer] = useState<{ urls: string[]; index: number } | null>(null);
   const [showWishForm, setShowWishForm] = usePersistentBool("ui:wishForm", true);
   const [showAddTask, setShowAddTask] = usePersistentBool("ui:addTask", true);
   const [wishForm, setWishForm] = useState({ title: "", details: "" });
@@ -1701,7 +1772,7 @@ export default function Home() {
                             {imgs.length > 0 && <span>🖼️ {imgs.length}</span>}
                           </div>
                         </div>
-                        {imgs[0] && <img src={imgs[0]} alt="" className="wish-thumb" onClick={() => toggleWish(w.id)} />}
+                        {imgs[0] && <WishImg key={imgs[0]} src={imgs[0]} width={120} className="wish-thumb" onClick={() => setViewer({ urls: imgs, index: 0 })} />}
                         <button type="button" className="chevron-btn" onClick={() => toggleWish(w.id)} aria-label="التفاصيل">
                           <ChevronDown size={18} className={open ? "chev open" : "chev"} />
                         </button>
@@ -1740,8 +1811,10 @@ export default function Home() {
                               {w.details && <p className="task-desc">{w.details}</p>}
                               {imgs.length > 0 && (
                                 <div className="img-thumbs big">
-                                  {imgs.map(u => (
-                                    <a key={u} href={u} target="_blank" rel="noreferrer" className="img-thumb"><img src={u} alt="" /></a>
+                                  {imgs.map((u, idx) => (
+                                    <button type="button" key={u} className="img-thumb" onClick={() => setViewer({ urls: imgs, index: idx })} aria-label="عرض الصورة">
+                                      <WishImg src={u} width={300} />
+                                    </button>
                                   ))}
                                 </div>
                               )}
@@ -2018,6 +2091,9 @@ export default function Home() {
           </form>
         </div>
       )}
+
+      {/* عارض الصور */}
+      {viewer && <ImageViewer urls={viewer.urls} index={viewer.index} onClose={() => setViewer(null)} />}
 
       {/* نافذة تأكيد الحذف */}
       {confirmDialog && (

@@ -350,6 +350,34 @@ input:focus, textarea:focus, select:focus { border-color: var(--primary); box-sh
 }
 .img-thumbs.big .img-thumb { width: 120px; height: 120px; }
 
+/* عارض الصور */
+.wish-thumb, button.img-thumb { cursor: zoom-in; }
+button.img-thumb { padding: 0; }
+.viewer {
+  position: fixed; inset: 0; z-index: 80; background: rgba(0, 0, 0, 0.92);
+  display: grid; place-items: center; touch-action: pan-y; animation: viewer-in 0.15s ease-out;
+}
+@keyframes viewer-in { from { opacity: 0; } to { opacity: 1; } }
+.viewer-stage { display: grid; place-items: center; }
+.viewer-stage > img {
+  grid-area: 1 / 1; width: 96vw; height: 86vh; height: 86dvh; max-width: none;
+  object-fit: contain; transition: opacity 0.2s;
+}
+.viewer-stage > img.blur { filter: blur(8px); }
+.viewer-btn {
+  position: fixed; border: 0; background: rgba(255, 255, 255, 0.16); color: #fff;
+  width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center;
+}
+.viewer-btn:hover { background: rgba(255, 255, 255, 0.28); }
+.viewer-close { top: calc(14px + env(safe-area-inset-top, 0px)); right: 14px; }
+.viewer-nav { top: 50%; transform: translateY(-50%); }
+.viewer-nav.prev { right: 12px; }
+.viewer-nav.next { left: 12px; }
+.viewer-count {
+  position: fixed; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%);
+  color: #fff; font-size: 13px; font-weight: 700; background: rgba(255, 255, 255, 0.16); padding: 4px 14px; border-radius: 20px;
+}
+
 /* ===== التقارير والطباعة ===== */
 .print-only { display: none; }
 .report { color: #111; font-size: 12px; }
@@ -371,7 +399,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--primary); box-sh
 @page { size: A4 landscape; margin: 12mm; }
 @media print {
   html, body { background: #fff !important; overflow: visible !important; }
-  .app-shell, .install-btn-wrap { display: none !important; }
+  .app-shell, .install-btn-wrap, .viewer { display: none !important; }
   .print-only { display: block; direction: rtl; }
   .report-table-wrap { overflow: visible; }
   .report-table th { background: #fef3c7 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
