@@ -7,7 +7,7 @@
 export const API_URL = "https://script.google.com/macros/s/AKfycbzL06R-fKGynhbJVQeXwtj2vLETsvaUC3mGPR4rxTblWfCSJorrT_aoL-rNGIK9EftS/exec";
 
 // من Firebase Console ← Project settings ← General ← Your apps (Web app) ← SDK setup and configuration
-export const firebaseConfig = {
+export const FIREBASE_CONFIG = {
   apiKey: "AIzaSyAwC0RgvsseaXd-vt1R6ccZCHB0nEGIwxU",
   authDomain: "i3lam-3e6ed.firebaseapp.com",
   projectId: "i3lam-3e6ed",
