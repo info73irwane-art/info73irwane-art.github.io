@@ -230,7 +230,7 @@ function ImageViewer({ urls, index, onClose }: { urls: string[]; index: number; 
           <button type="button" className="viewer-btn viewer-nav next" onClick={() => go(1)} aria-label="التالية"><ChevronLeft size={26} /></button>
         </>
       )}
-      <span className="viewer-count">{many ? `${i + 1} / ${urls.length}` : ""}{zoomed ? `${many ? " · " : ""}${Math.round(z.s * 100)}%` : ""}</span>
+      <span className="viewer-count" dir="ltr">{many ? `${i + 1} / ${urls.length}` : ""}{zoomed ? `${many ? " · " : ""}${Math.round(z.s * 100)}%` : ""}</span>
     </div>
   );
 }
