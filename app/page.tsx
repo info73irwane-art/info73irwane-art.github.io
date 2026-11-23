@@ -6,7 +6,7 @@ import { FIREBASE_VAPID_KEY } from "@/lib/config";
 import { getFcmToken, deleteFcmToken } from "@/lib/fcm";
 import {
   Check, CheckCircle2, Circle, ClipboardList, FolderKanban, Plus,
-  LogOut, RefreshCw, Search, Users, X, CalendarDays, User, Globe, Settings, Edit3, Trash2, RotateCcw, ChevronDown, Printer, FileText, Clock, ShieldCheck, Bell, Lightbulb, Camera, Image as ImageIcon, ChevronLeft, ChevronRight, ArrowUp, ArrowDown, ChevronsUp, ArrowUpDown
+  LogOut, RefreshCw, Search, Users, X, CalendarDays, User, Globe, Settings, Edit3, Trash2, RotateCcw, ChevronDown, Printer, FileText, Clock, ShieldCheck, Bell, Lightbulb, Camera, Image as ImageIcon, ChevronLeft, ChevronRight
 } from "lucide-react";
 
 type Profile = { id: string; full_name: string; email: string; avatar_url?: string; role: string; status?: string; password_changed?: boolean; task_order?: string[] };
@@ -520,7 +520,6 @@ export default function Home() {
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void; title?: string; confirmLabel?: string } | null>(null);
   const [projectFilter, setProjectFilter] = useState("all");
   const [openTasks, setOpenTasks] = useState<Record<string, boolean>>({});
-  const [reorderMode, setReorderMode] = useState(false);
   const [showProjects, setShowProjects] = useState(true);
   const [showTasks, setShowTasks] = useState(true);
   const [showTeam, setShowTeam] = useState(false);
@@ -1194,17 +1193,135 @@ export default function Home() {
   const ordered = useMemo(() => applyCustomOrder(filtered, myOrder), [filtered, myOrder]);
   const activeVisibleIds = ordered.filter(isActiveTask).map(t => t.id);
 
-  // نقل مهمة في الترتيب الخاص (بالنسبة للمهام الظاهرة حالياً)
-  function moveTask(task: Task, where: "up" | "down" | "top") {
-    const idx = activeVisibleIds.indexOf(task.id);
-    if (idx < 0) return;
-    const anchorId = where === "top" ? activeVisibleIds[0] : where === "up" ? activeVisibleIds[idx - 1] : activeVisibleIds[idx + 1];
-    if (!anchorId || anchorId === task.id) return;
+  // نقل مهمة إلى موضع جديد بين المهام الظاهرة، مع الحفاظ على ترتيب المهام غير الظاهرة
+  function placeTask(id: string, target: number) {
+    const others = activeVisibleIds.filter(x => x !== id);
     const full = applyCustomOrder(tasks.filter(isActiveTask).sort(compareTasks), myOrder)
-      .map(t => t.id).filter(id => id !== task.id);
-    const at = full.indexOf(anchorId);
-    full.splice(where === "down" ? at + 1 : at, 0, task.id);
+      .map(t => t.id).filter(x => x !== id);
+    if (target <= 0) full.splice(Math.max(0, full.indexOf(others[0])), 0, id);
+    else full.splice(full.indexOf(others[target - 1]) + 1, 0, id);
     saveOrder(full);
+  }
+
+  // ===== إعادة الترتيب بالضغط المطوّل ثم السحب (مثل Google Keep) =====
+  const [drag, setDrag] = useState<{ id: string; orig: number; target: number; dy: number; h: number } | null>(null);
+  const pressRef = useRef<{ id: string; pointerId: number; x: number; y: number; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const dragRef = useRef<{ id: string; orig: number; startDocY: number; mid0: number; h: number; mids: { id: string; mid: number }[]; clientY: number; target: number; raf: number } | null>(null);
+  const suppressClick = useRef(false);
+  const dragHandlers = useRef<{ move: (e: PointerEvent) => void; up: (e: PointerEvent) => void }>({ move: () => {}, up: () => {} });
+
+  function cancelPress() {
+    if (pressRef.current) clearTimeout(pressRef.current.timer);
+    pressRef.current = null;
+  }
+
+  function updateDrag() {
+    const d = dragRef.current;
+    if (!d) return;
+    const dy = d.clientY + window.scrollY - d.startDocY;
+    const center = d.mid0 + dy;
+    d.target = d.mids.filter(r => r.id !== d.id && r.mid < center).length;
+    setDrag({ id: d.id, orig: d.orig, target: d.target, dy, h: d.h });
+  }
+
+  function startDrag(id: string, clientY: number) {
+    pressRef.current = null;
+    const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-active-id]"));
+    const mids = rows.map(el => {
+      const r = el.getBoundingClientRect();
+      return { id: el.dataset.activeId!, mid: r.top + window.scrollY + r.height / 2, h: r.height };
+    });
+    const orig = mids.findIndex(m => m.id === id);
+    if (orig < 0) return;
+    const d = { id, orig, startDocY: clientY + window.scrollY, mid0: mids[orig].mid, h: mids[orig].h, mids, clientY, target: orig, raf: 0 };
+    dragRef.current = d;
+    navigator.vibrate?.(25);
+    document.body.classList.add("drag-active");
+    // تمرير تلقائي عند الاقتراب من أعلى الشاشة أو أسفلها
+    const tick = () => {
+      const cur = dragRef.current;
+      if (!cur) return;
+      const edge = 90, y = cur.clientY;
+      if (y < edge) window.scrollBy(0, -Math.ceil((edge - y) / 6));
+      else if (y > window.innerHeight - edge) window.scrollBy(0, Math.ceil((y - window.innerHeight + edge) / 6));
+      updateDrag();
+      cur.raf = requestAnimationFrame(tick);
+    };
+    d.raf = requestAnimationFrame(tick);
+    updateDrag();
+  }
+
+  function endDrag() {
+    const d = dragRef.current;
+    dragRef.current = null;
+    document.body.classList.remove("drag-active");
+    setDrag(null);
+    if (!d) return;
+    cancelAnimationFrame(d.raf);
+    // نتجاهل النقرة التي تنتج عن رفع الإصبع بعد السحب فقط
+    suppressClick.current = true;
+    setTimeout(() => { suppressClick.current = false; }, 250);
+    if (d.target !== d.orig) placeTask(d.id, d.target);
+  }
+
+  function onRowPointerDown(e: React.PointerEvent, task: Task) {
+    suppressClick.current = false;
+    if (!isActiveTask(task) || e.button !== 0) return;
+    if ((e.target as HTMLElement).closest("button, a, input, select, textarea")) return;
+    cancelPress();
+    const { pointerId, clientX, clientY } = e;
+    pressRef.current = {
+      id: task.id, pointerId, x: clientX, y: clientY,
+      timer: setTimeout(() => { if (pressRef.current) startDrag(task.id, pressRef.current.y); }, 380),
+    };
+  }
+
+  dragHandlers.current = {
+    move: (e: PointerEvent) => {
+      const p = pressRef.current;
+      if (p && e.pointerId === p.pointerId) {
+        // حركة قبل انتهاء الضغط المطوّل = تمرير عادي للقائمة
+        if (Math.hypot(e.clientX - p.x, e.clientY - p.y) > 10) cancelPress();
+        return;
+      }
+      if (dragRef.current) { dragRef.current.clientY = e.clientY; updateDrag(); }
+    },
+    up: () => {
+      cancelPress();
+      if (dragRef.current) endDrag();
+    },
+  };
+
+  useEffect(() => {
+    const move = (e: PointerEvent) => dragHandlers.current.move(e);
+    const up = (e: PointerEvent) => dragHandlers.current.up(e);
+    // أثناء السحب نمنع تمرير الصفحة باللمس وقائمة الضغط المطوّل
+    const touchMove = (e: TouchEvent) => { if (dragRef.current) e.preventDefault(); };
+    const ctxMenu = (e: Event) => { if (pressRef.current || dragRef.current) e.preventDefault(); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    window.addEventListener("touchmove", touchMove, { passive: false });
+    window.addEventListener("contextmenu", ctxMenu);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      window.removeEventListener("touchmove", touchMove);
+      window.removeEventListener("contextmenu", ctxMenu);
+    };
+  }, []);
+
+  // إزاحة المهام الأخرى لإفساح المكان للمهمة المسحوبة
+  function dragStyle(taskId: string): React.CSSProperties | undefined {
+    if (!drag) return undefined;
+    if (taskId === drag.id) return { transform: `translateY(${drag.dy}px)` };
+    const k = activeVisibleIds.indexOf(taskId);
+    if (k < 0) return undefined;
+    let shift = 0;
+    if (drag.orig < drag.target && k > drag.orig && k <= drag.target) shift = -drag.h;
+    if (drag.orig > drag.target && k >= drag.target && k < drag.orig) shift = drag.h;
+    return { transform: shift ? `translateY(${shift}px)` : undefined, transition: "transform 0.15s ease" };
   }
 
   async function saveOrder(order: string[]) {
@@ -1220,7 +1337,7 @@ export default function Home() {
       title: "الترتيب الافتراضي",
       message: "إلغاء ترتيبك الخاص والعودة إلى الترتيب حسب قرب موعد الإنجاز ثم الأقدمية؟",
       confirmLabel: "نعم، أعده",
-      onConfirm: () => { saveOrder([]); setReorderMode(false); },
+      onConfirm: () => saveOrder([]),
     });
   }
 
@@ -1609,16 +1726,9 @@ export default function Home() {
               {myOrder.length > 0 && (
                 <button type="button" className="subtle-btn" onClick={askResetOrder}><RotateCcw size={14} /> الترتيب الافتراضي</button>
               )}
-              <button type="button" className={reorderMode ? "primary" : "secondary"} onClick={() => setReorderMode(v => !v)}>
-                <ArrowUpDown size={14} /> {reorderMode ? "تم" : "إعادة الترتيب"}
-              </button>
             </div>
+            <span className="muted order-hint-inline">✋ اضغط مطوّلاً على مهمة ثم اسحبها لتغيير ترتيبها (ترتيبك خاص بك)</span>
           </div>
-          {reorderMode && (
-            <p className="muted order-hint">
-              استعمل الأسهم بجانب كل مهمة لرفعها أو إنزالها، أو السهم المزدوج لنقلها إلى الأعلى. ترتيبك خاص بك ويظهر على كل أجهزتك، ولا يغيّر ما يراه الآخرون.
-            </p>
-          )}
 
           {authError && <div className="error">{authError}</div>}
           {loading ? <div className="empty">جارٍ تحميل المهام...</div> : ordered.length === 0 ? <div className="empty">لا توجد مهام في هذا القسم حالياً.</div> : (
@@ -1634,8 +1744,14 @@ export default function Home() {
                 const showBadge = info.kind === "late" || info.kind === "soon" || info.kind === "cancelled" || info.kind === "deferred";
 
                 return (
-                  <article className={"task-row" + (task.status === "completed" ? " is-complete" : "") + (open ? " is-open" : "")} key={task.id}>
-                    <div className="task-summary">
+                  <article
+                    className={"task-row" + (task.status === "completed" ? " is-complete" : "") + (open ? " is-open" : "") + (drag?.id === task.id ? " is-dragging" : "")}
+                    key={task.id}
+                    data-active-id={isActiveTask(task) ? task.id : undefined}
+                    style={dragStyle(task.id)}
+                    onClickCapture={e => { if (suppressClick.current) { e.stopPropagation(); e.preventDefault(); } }}
+                  >
+                    <div className="task-summary draggable" onPointerDown={e => onRowPointerDown(e, task)}>
                       <button
                         className="check-button"
                         disabled={!canProg}
@@ -1675,17 +1791,6 @@ export default function Home() {
                         </div>
                       </div>
 
-                      {reorderMode && isActiveTask(task) && (() => {
-                        const pos = activeVisibleIds.indexOf(task.id);
-                        const first = pos === 0, last = pos === activeVisibleIds.length - 1;
-                        return (
-                          <div className="reorder-btns">
-                            <button type="button" onClick={() => moveTask(task, "top")} disabled={first} title="إلى الأعلى" aria-label="إلى الأعلى"><ChevronsUp size={16} /></button>
-                            <button type="button" onClick={() => moveTask(task, "up")} disabled={first} title="رفع" aria-label="رفع"><ArrowUp size={16} /></button>
-                            <button type="button" onClick={() => moveTask(task, "down")} disabled={last} title="إنزال" aria-label="إنزال"><ArrowDown size={16} /></button>
-                          </div>
-                        );
-                      })()}
                       <button type="button" className="chevron-btn" onClick={() => toggleTask(task.id)} aria-label="التفاصيل">
                         <ChevronDown size={18} className={open ? "chev open" : "chev"} />
                       </button>
