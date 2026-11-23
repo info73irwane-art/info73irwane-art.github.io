@@ -80,7 +80,44 @@ function newRow(table: string, v: Row): Row {
   };
 }
 
+// الترتيب المشترك للمهام (نفس قواعد الخادم)
+function compareTasks(a: Row, b: Row) {
+  const s = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
+  if (a.due_date && b.due_date) return s(a.due_date, b.due_date) || s(a.created_at || "", b.created_at || "");
+  if (a.due_date) return -1;
+  if (b.due_date) return 1;
+  return s(a.created_at || "", b.created_at || "");
+}
+function mergedOrder(tasks: Row[], order: string[]): string[] {
+  const list = tasks.filter(t => t.status === "pending" || t.status === "deferred").sort(compareTasks);
+  const rank = new Map<string, number>();
+  order.forEach((id, i) => { if (!rank.has(id)) rank.set(id, i); });
+  const out = list.filter(t => rank.has(t.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
+  list.filter(t => !rank.has(t.id)).forEach(u => {
+    let idx = out.findIndex(r => rank.has(r.id) && compareTasks(u, r) < 0);
+    if (idx < 0) idx = out.length;
+    out.splice(idx, 0, u);
+  });
+  return out.map(t => t.id);
+}
+function setLocalOrder(snap: Snapshot, order: string[]) {
+  const rows = snap.tables.settings || (snap.tables.settings = []);
+  const row = rows.find(r => r.key === "task_order");
+  if (row) row.value = order; else rows.push({ key: "task_order", value: order });
+}
+
 function applyOp(snap: Snapshot, op: Op) {
+  if (op.type === "rpc") {
+    const order = ((snap.tables.settings || []).find(r => r.key === "task_order")?.value as string[]) || [];
+    if (op.name === "reset_task_order") setLocalOrder(snap, []);
+    if (op.name === "move_task") {
+      const full = mergedOrder(snap.tables.tasks || [], order).filter(x => x !== op.args.id);
+      const at = full.indexOf(op.args.anchor);
+      if (at < 0) full.push(op.args.id); else full.splice(op.args.where === "after" ? at + 1 : at, 0, op.args.id);
+      setLocalOrder(snap, full);
+    }
+    return;
+  }
   const rows = snap.tables[op.table];
   if (!rows) return;
   if (op.type === "insert") {
@@ -410,7 +447,10 @@ export const supabase = {
   },
 
   rpc(name: string, args?: Record<string, unknown>) {
-    return call({ type: "rpc", name, args: args || {} });
+    const op = { type: "rpc", name, args: args || {} };
+    // تغيير الترتيب يظهر فوراً ويُرسل في الخلفية
+    if (session && view && (name === "move_task" || name === "reset_task_order")) return Promise.resolve(queueWrite(op));
+    return call(op);
   },
 
   storage: {

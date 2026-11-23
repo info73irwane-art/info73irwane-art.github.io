@@ -520,6 +520,7 @@ export default function Home() {
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void; title?: string; confirmLabel?: string } | null>(null);
   const [projectFilter, setProjectFilter] = useState("all");
   const [openTasks, setOpenTasks] = useState<Record<string, boolean>>({});
+  const [taskOrder, setTaskOrder] = useState<string[]>([]); // الترتيب المشترك بين الفريق
   const [showProjects, setShowProjects] = useState(true);
   const [showTasks, setShowTasks] = useState(true);
   const [showTeam, setShowTeam] = useState(false);
@@ -597,11 +598,12 @@ export default function Home() {
 
   async function loadData(showSpinner = false) {
     if (showSpinner) setLoading(true);
-    const [t, p, m, w] = await Promise.all([
+    const [t, p, m, w, st] = await Promise.all([
       supabase.from("tasks").select("*").order("created_at", { ascending: false }),
       supabase.from("projects").select("*").order("name"),
       supabase.from("profiles").select("id,full_name,email,avatar_url,role,status,password_changed").order("full_name"),
-      supabase.from("wishlist_items").select("*").order("created_at", { ascending: false })
+      supabase.from("wishlist_items").select("*").order("created_at", { ascending: false }),
+      supabase.from("settings").select("*")
     ]);
     if (t.error || p.error || m.error) {
       setAuthError("تعذر تحميل البيانات.");
@@ -613,6 +615,10 @@ export default function Home() {
       setMembers(profs.filter(p => p.status === "approved"));
       setMyProfile(prev => profs.find(p => p.id === prev?.id) ?? prev);
       if (!w.error) setWishlist((w.data || []) as WishItem[]);
+      if (!st.error) {
+        const row = ((st.data || []) as { key: string; value: unknown }[]).find(r => r.key === "task_order");
+        setTaskOrder(Array.isArray(row?.value) ? (row!.value as string[]) : []);
+      }
       setAuthError("");
     }
     setLoading(false);
@@ -1189,19 +1195,24 @@ export default function Home() {
     const q = search.trim().toLowerCase();
     return matchesFilter && (!q || t.title.toLowerCase().includes(q) || (t.description || "").toLowerCase().includes(q));
   }).sort(compareTasks), [scopedTasks, filter, search]);
-  const myOrder = useMemo(() => myProfile?.task_order || [], [myProfile?.task_order]);
+  const myOrder = taskOrder;
   const ordered = useMemo(() => applyCustomOrder(filtered, myOrder), [filtered, myOrder]);
   const activeVisibleIds = ordered.filter(isActiveTask).map(t => t.id);
 
-  // نقل مهمة إلى موضع جديد بين المهام الظاهرة، مع الحفاظ على ترتيب المهام غير الظاهرة
-  function placeTask(id: string, target: number) {
+  // نقل مهمة إلى موضع جديد بين المهام الظاهرة (الترتيب مشترك ويظهر لكل الفريق)
+  async function placeTask(id: string, target: number) {
     const others = activeVisibleIds.filter(x => x !== id);
-    const full = applyCustomOrder(tasks.filter(isActiveTask).sort(compareTasks), myOrder)
-      .map(t => t.id).filter(x => x !== id);
-    if (target <= 0) full.splice(Math.max(0, full.indexOf(others[0])), 0, id);
-    else full.splice(full.indexOf(others[target - 1]) + 1, 0, id);
-    saveOrder(full);
+    if (!others.length) return;
+    const args = target <= 0
+      ? { id, anchor: others[0], where: "before" }
+      : { id, anchor: others[target - 1], where: "after" };
+    const { error } = await supabase.rpc("move_task", args);
+    if (error) alert("تعذر حفظ الترتيب: " + error.message);
+    await loadData();
   }
+
+  // ترتيب المهمة لصاحبها (المكلَّف بها) أو للمسؤول
+  const canReorder = (t: Task) => isActiveTask(t) && (isAdmin || t.assignee_id === session?.user?.id);
 
   // ===== إعادة الترتيب بالضغط المطوّل ثم السحب (مثل Google Keep) =====
   const [drag, setDrag] = useState<{ id: string; orig: number; target: number; dy: number; h: number } | null>(null);
@@ -1266,7 +1277,7 @@ export default function Home() {
 
   function onRowPointerDown(e: React.PointerEvent, task: Task) {
     suppressClick.current = false;
-    if (!isActiveTask(task) || e.button !== 0) return;
+    if (!canReorder(task) || e.button !== 0) return;
     if ((e.target as HTMLElement).closest("button, a, input, select, textarea")) return;
     cancelPress();
     const { pointerId, clientX, clientY } = e;
@@ -1324,20 +1335,16 @@ export default function Home() {
     return { transform: shift ? `translateY(${shift}px)` : undefined, transition: "transform 0.15s ease" };
   }
 
-  async function saveOrder(order: string[]) {
-    if (!session?.user?.id) return;
-    setMyProfile(prev => (prev ? { ...prev, task_order: order } : prev));
-    const { error } = await supabase.from("profiles").update({ task_order: order }).eq("id", session.user.id);
-    if (error) alert("تعذر حفظ الترتيب: " + error.message);
-    await loadData();
-  }
-
   function askResetOrder() {
     setConfirmDialog({
       title: "الترتيب الافتراضي",
-      message: "إلغاء ترتيبك الخاص والعودة إلى الترتيب حسب قرب موعد الإنجاز ثم الأقدمية؟",
+      message: "إلغاء الترتيب المشترك للفريق كله والعودة إلى الترتيب حسب قرب موعد الإنجاز ثم الأقدمية؟",
       confirmLabel: "نعم، أعده",
-      onConfirm: () => saveOrder([]),
+      onConfirm: async () => {
+        const { error } = await supabase.rpc("reset_task_order", {});
+        if (error) alert("تعذر إعادة الترتيب: " + error.message);
+        await loadData();
+      },
     });
   }
 
@@ -1721,13 +1728,17 @@ export default function Home() {
           </div>
 
           <div className="order-bar">
-            <span className="muted">{myOrder.length ? "الترتيب: ترتيبك الخاص" : "الترتيب: الأقرب موعداً ثم الأقدم"}</span>
+            <span className="muted">{myOrder.length ? "الترتيب: حسب أولويات الفريق" : "الترتيب: الأقرب موعداً ثم الأقدم"}</span>
             <div className="order-actions">
-              {myOrder.length > 0 && (
+              {isAdmin && myOrder.length > 0 && (
                 <button type="button" className="subtle-btn" onClick={askResetOrder}><RotateCcw size={14} /> الترتيب الافتراضي</button>
               )}
             </div>
-            <span className="muted order-hint-inline">✋ اضغط مطوّلاً على مهمة ثم اسحبها لتغيير ترتيبها (ترتيبك خاص بك)</span>
+            <span className="muted order-hint-inline">
+              {isAdmin
+                ? "✋ اضغط مطوّلاً على أي مهمة ثم اسحبها لتغيير ترتيبها. الترتيب يظهر لكل الفريق."
+                : "✋ اضغط مطوّلاً على مهمة من مهامك ثم اسحبها لتغيير ترتيبها. الترتيب يظهر لكل الفريق."}
+            </span>
           </div>
 
           {authError && <div className="error">{authError}</div>}
@@ -1751,7 +1762,7 @@ export default function Home() {
                     style={dragStyle(task.id)}
                     onClickCapture={e => { if (suppressClick.current) { e.stopPropagation(); e.preventDefault(); } }}
                   >
-                    <div className="task-summary draggable" onPointerDown={e => onRowPointerDown(e, task)}>
+                    <div className={"task-summary" + (canReorder(task) ? " draggable" : "")} onPointerDown={e => onRowPointerDown(e, task)}>
                       <button
                         className="check-button"
                         disabled={!canProg}
