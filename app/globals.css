@@ -192,6 +192,18 @@ input:focus, textarea:focus, select:focus { border-color: var(--primary); box-sh
 }
 .active-filter { background: #fef3c7; color: var(--primary); font-weight: 700; border-color: #fde68a; }
 
+/* إعادة ترتيب المهام */
+.order-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 0 0 10px; font-size: 12px; }
+.order-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.order-actions .primary, .order-actions .secondary { padding: 7px 12px; font-size: 12px; }
+.order-hint { font-size: 12px; margin: 0 0 10px; background: #fffaf5; border: 1px dashed var(--line); padding: 8px 10px; border-radius: 10px; line-height: 1.8; }
+.reorder-btns { display: flex; gap: 3px; flex-shrink: 0; }
+.reorder-btns button {
+  border: 1px solid var(--line); background: #fff; color: var(--primary);
+  width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; padding: 0;
+}
+.reorder-btns button:hover:not(:disabled) { background: #fef3c7; }
+.reorder-btns button:disabled { opacity: 0.3; cursor: default; }
 .task-list { display: grid; width: 100%; }
 .task-row { border-bottom: 1px solid #fef3c7; transition: 0.15s; width: 100%; }
 .task-summary { display: flex; align-items: center; gap: 10px; padding: 12px 4px; }

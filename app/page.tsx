@@ -6,10 +6,10 @@ import { FIREBASE_VAPID_KEY } from "@/lib/config";
 import { getFcmToken, deleteFcmToken } from "@/lib/fcm";
 import {
   Check, CheckCircle2, Circle, ClipboardList, FolderKanban, Plus,
-  LogOut, RefreshCw, Search, Users, X, CalendarDays, User, Globe, Settings, Edit3, Trash2, RotateCcw, ChevronDown, Printer, FileText, Clock, ShieldCheck, Bell, Lightbulb, Camera, Image as ImageIcon, ChevronLeft, ChevronRight
+  LogOut, RefreshCw, Search, Users, X, CalendarDays, User, Globe, Settings, Edit3, Trash2, RotateCcw, ChevronDown, Printer, FileText, Clock, ShieldCheck, Bell, Lightbulb, Camera, Image as ImageIcon, ChevronLeft, ChevronRight, ArrowUp, ArrowDown, ChevronsUp, ArrowUpDown
 } from "lucide-react";
 
-type Profile = { id: string; full_name: string; email: string; avatar_url?: string; role: string; status?: string; password_changed?: boolean };
+type Profile = { id: string; full_name: string; email: string; avatar_url?: string; role: string; status?: string; password_changed?: boolean; task_order?: string[] };
 type Project = { id: string; name: string; color: string; status: string; created_at?: string };
 type Task = {
   id: string; title: string; description: string | null; project_id: string | null;
@@ -381,6 +381,22 @@ function compareTasks(a: Task, b: Task) {
   return a.created_at.localeCompare(b.created_at);
 }
 
+// الترتيب الخاص بالعضو: المهام التي رتّبها تأخذ مكانها حسب ترتيبه،
+// والمهام الأخرى (الجديدة مثلاً) تدخل في مكانها حسب قرب الموعد ثم الأقدمية
+function applyCustomOrder(list: Task[], order: string[]): Task[] {
+  if (!order.length) return list;
+  const rank = new Map(order.map((id, i) => [id, i]));
+  const out = list.filter(t => rank.has(t.id)).sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
+  list.filter(t => !rank.has(t.id)).forEach(u => {
+    let idx = out.findIndex(r => rank.has(r.id) && compareTasks(u, r) < 0);
+    if (idx < 0) idx = out.length;
+    out.splice(idx, 0, u);
+  });
+  return out;
+}
+
+const isActiveTask = (t: Task) => t.status === "pending" || t.status === "deferred";
+
 function taskStatusInfo(t: Task): { label: string; kind: string } {
   const st = effStatus(t);
   if (st === "completed") return { label: "مكتملة", kind: "done" };
@@ -390,7 +406,7 @@ function taskStatusInfo(t: Task): { label: string; kind: string } {
   if (!t.due_date) return { label: "بدون موعد" + returned, kind: "none" };
   const d = dayDiff(t.due_date);
   if (d < 0) return { label: `متأخرة ${Math.abs(d)} يوم` + returned, kind: "late" };
-  if (d === 0) return { label: "تُسلم اليوم" + returned, kind: "soon" };
+  if (d === 0) return { label: "تُنجز اليوم" + returned, kind: "soon" };
   return { label: `باقي ${d} يوم` + returned, kind: d <= t.remind_days ? "soon" : "ok" };
 }
 
@@ -413,8 +429,8 @@ function reportNote(t: Task): { text: string; kind: string } {
   if (st === "deferred") return { text: "مؤجلة", kind: "" };
   if (!t.due_date) return { text: "بدون موعد", kind: "" };
   const d = dayDiff(t.due_date);
-  if (d < 0) return { text: `متأخرة ${-d} يوم (لم تُسلَّم)`, kind: "late" };
-  if (d === 0) return { text: "تُسلَّم اليوم", kind: "" };
+  if (d < 0) return { text: `متأخرة ${-d} يوم (لم تُنجز)`, kind: "late" };
+  if (d === 0) return { text: "تُنجز اليوم", kind: "" };
   return { text: `متبقٍ ${d} يوم`, kind: "" };
 }
 
@@ -504,6 +520,7 @@ export default function Home() {
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void; title?: string; confirmLabel?: string } | null>(null);
   const [projectFilter, setProjectFilter] = useState("all");
   const [openTasks, setOpenTasks] = useState<Record<string, boolean>>({});
+  const [reorderMode, setReorderMode] = useState(false);
   const [showProjects, setShowProjects] = useState(true);
   const [showTasks, setShowTasks] = useState(true);
   const [showTeam, setShowTeam] = useState(false);
@@ -1173,6 +1190,39 @@ export default function Home() {
     const q = search.trim().toLowerCase();
     return matchesFilter && (!q || t.title.toLowerCase().includes(q) || (t.description || "").toLowerCase().includes(q));
   }).sort(compareTasks), [scopedTasks, filter, search]);
+  const myOrder = useMemo(() => myProfile?.task_order || [], [myProfile?.task_order]);
+  const ordered = useMemo(() => applyCustomOrder(filtered, myOrder), [filtered, myOrder]);
+  const activeVisibleIds = ordered.filter(isActiveTask).map(t => t.id);
+
+  // نقل مهمة في الترتيب الخاص (بالنسبة للمهام الظاهرة حالياً)
+  function moveTask(task: Task, where: "up" | "down" | "top") {
+    const idx = activeVisibleIds.indexOf(task.id);
+    if (idx < 0) return;
+    const anchorId = where === "top" ? activeVisibleIds[0] : where === "up" ? activeVisibleIds[idx - 1] : activeVisibleIds[idx + 1];
+    if (!anchorId || anchorId === task.id) return;
+    const full = applyCustomOrder(tasks.filter(isActiveTask).sort(compareTasks), myOrder)
+      .map(t => t.id).filter(id => id !== task.id);
+    const at = full.indexOf(anchorId);
+    full.splice(where === "down" ? at + 1 : at, 0, task.id);
+    saveOrder(full);
+  }
+
+  async function saveOrder(order: string[]) {
+    if (!session?.user?.id) return;
+    setMyProfile(prev => (prev ? { ...prev, task_order: order } : prev));
+    const { error } = await supabase.from("profiles").update({ task_order: order }).eq("id", session.user.id);
+    if (error) alert("تعذر حفظ الترتيب: " + error.message);
+    await loadData();
+  }
+
+  function askResetOrder() {
+    setConfirmDialog({
+      title: "الترتيب الافتراضي",
+      message: "إلغاء ترتيبك الخاص والعودة إلى الترتيب حسب قرب موعد الإنجاز ثم الأقدمية؟",
+      confirmLabel: "نعم، أعده",
+      onConfirm: () => { saveOrder([]); setReorderMode(false); },
+    });
+  }
 
   const pendingAndOverdueCount = baseTasks.filter(t => effStatus(t) === "pending").length;
   const overdueCount = baseTasks.filter(t => effStatus(t) === "pending" && !!t.due_date && dayDiff(t.due_date) < 0).length;
@@ -1252,7 +1302,7 @@ export default function Home() {
             <thead>
               <tr>
                 <th>#</th><th>المهمة</th><th>المكلف</th><th>المشروع</th><th>تاريخ الاستلام</th>
-                <th>موعد التسليم</th><th>تاريخ التسليم</th><th>الحالة</th><th>التقدم / التأخر</th>
+                <th>موعد الإنجاز</th><th>تاريخ الإنجاز</th><th>الحالة</th><th>التقدم / التأخر</th>
               </tr>
             </thead>
             <tbody>
@@ -1454,7 +1504,7 @@ export default function Home() {
               </select>
             </div>
             <div className="form-group">
-              <label>تاريخ التسليم</label>
+              <label>موعد الإنجاز</label>
               <input type="date" value={form.due_date} onChange={e => setForm({ ...form, due_date: e.target.value })} />
             </div>
             <div className="form-group">
@@ -1553,10 +1603,27 @@ export default function Home() {
             ))}
           </div>
 
+          <div className="order-bar">
+            <span className="muted">{myOrder.length ? "الترتيب: ترتيبك الخاص" : "الترتيب: الأقرب موعداً ثم الأقدم"}</span>
+            <div className="order-actions">
+              {myOrder.length > 0 && (
+                <button type="button" className="subtle-btn" onClick={askResetOrder}><RotateCcw size={14} /> الترتيب الافتراضي</button>
+              )}
+              <button type="button" className={reorderMode ? "primary" : "secondary"} onClick={() => setReorderMode(v => !v)}>
+                <ArrowUpDown size={14} /> {reorderMode ? "تم" : "إعادة الترتيب"}
+              </button>
+            </div>
+          </div>
+          {reorderMode && (
+            <p className="muted order-hint">
+              استعمل الأسهم بجانب كل مهمة لرفعها أو إنزالها، أو السهم المزدوج لنقلها إلى الأعلى. ترتيبك خاص بك ويظهر على كل أجهزتك، ولا يغيّر ما يراه الآخرون.
+            </p>
+          )}
+
           {authError && <div className="error">{authError}</div>}
-          {loading ? <div className="empty">جارٍ تحميل المهام...</div> : filtered.length === 0 ? <div className="empty">لا توجد مهام في هذا القسم حالياً.</div> : (
+          {loading ? <div className="empty">جارٍ تحميل المهام...</div> : ordered.length === 0 ? <div className="empty">لا توجد مهام في هذا القسم حالياً.</div> : (
             <div className="task-list">
-              {filtered.map(task => {
+              {ordered.map(task => {
                 const open = !!openTasks[task.id];
                 const info = taskStatusInfo(task);
                 const assignee = getMember(task.assignee_id);
@@ -1608,6 +1675,17 @@ export default function Home() {
                         </div>
                       </div>
 
+                      {reorderMode && isActiveTask(task) && (() => {
+                        const pos = activeVisibleIds.indexOf(task.id);
+                        const first = pos === 0, last = pos === activeVisibleIds.length - 1;
+                        return (
+                          <div className="reorder-btns">
+                            <button type="button" onClick={() => moveTask(task, "top")} disabled={first} title="إلى الأعلى" aria-label="إلى الأعلى"><ChevronsUp size={16} /></button>
+                            <button type="button" onClick={() => moveTask(task, "up")} disabled={first} title="رفع" aria-label="رفع"><ArrowUp size={16} /></button>
+                            <button type="button" onClick={() => moveTask(task, "down")} disabled={last} title="إنزال" aria-label="إنزال"><ArrowDown size={16} /></button>
+                          </div>
+                        );
+                      })()}
                       <button type="button" className="chevron-btn" onClick={() => toggleTask(task.id)} aria-label="التفاصيل">
                         <ChevronDown size={18} className={open ? "chev open" : "chev"} />
                       </button>
@@ -1620,7 +1698,7 @@ export default function Home() {
                           <div className="detail-item"><dt>المكلف بالمهمة</dt><dd>{assignee?.full_name || "غير محدد"}</dd></div>
                           <div className="detail-item"><dt>أضافها</dt><dd>{creator?.full_name || "—"}</dd></div>
                           <div className="detail-item hide-mobile"><dt>تاريخ الاستلام</dt><dd>{fmtDate(task.created_at)}</dd></div>
-                          <div className="detail-item"><dt>موعد التسليم</dt><dd>{task.due_date ? fmtDate(task.due_date) : "غير محدد"}</dd></div>
+                          <div className="detail-item"><dt>موعد الإنجاز</dt><dd>{task.due_date ? fmtDate(task.due_date) : "غير محدد"}</dd></div>
                           <div className="detail-item"><dt>الحالة</dt><dd><span className={"deadline " + info.kind}>{info.label}</span></dd></div>
                           <div className="detail-item"><dt>المشروع</dt><dd>{proj?.name || "بدون مشروع"}</dd></div>
                           {task.status === "completed" && task.completed_at && (
@@ -1782,7 +1860,7 @@ export default function Home() {
                           </dd>
                         </div>
                         <div className="detail-item hide-mobile"><dt>تاريخ الاستلام</dt><dd>{fmtDate(t.created_at)}</dd></div>
-                        <div className="detail-item"><dt>موعد التسليم</dt><dd>{t.due_date ? fmtDate(t.due_date) : "غير محدد"}</dd></div>
+                        <div className="detail-item"><dt>موعد الإنجاز</dt><dd>{t.due_date ? fmtDate(t.due_date) : "غير محدد"}</dd></div>
                         {t.status === "completed" && t.completed_at && (
                           <div className="detail-item"><dt>تاريخ الإنجاز</dt><dd>{fmtDate(t.completed_at)}</dd></div>
                         )}
@@ -2039,7 +2117,7 @@ export default function Home() {
               )}
             </div>
             <p className="muted" style={{ margin: 0, fontSize: 12 }}>
-              يشمل التقرير المهام التي استُلمت أو حلّ موعد تسليمها أو سُلّمت خلال الفترة المختارة.
+              يشمل التقرير المهام التي استُلمت أو حلّ موعد إنجازها أو أُنجزت خلال الفترة المختارة.
             </p>
             <div className="report-preview">{renderReport()}</div>
           </div>
@@ -2154,7 +2232,7 @@ export default function Home() {
             <div className="profile-section">
               <h4>🔔 التنبيهات على هذا الجهاز</h4>
               <p className="muted" style={{ margin: 0, fontSize: 13 }}>
-                تصلك تنبيهات عند تكليفك بمهمة جديدة، وصباح يوم موعد تسليم أي مهمة لم تُسلَّم بعد.
+                تصلك تنبيهات عند تكليفك بمهمة جديدة، وصباح يوم موعد إنجاز أي مهمة لم تُنجز بعد.
               </p>
               {pushOn ? (
                 <div className="modal-actions" style={{ justifyContent: "space-between", alignItems: "center" }}>
@@ -2181,7 +2259,7 @@ export default function Home() {
             <div className="form-grid">
               <label>المشروع<select value={editingTask.project_id || ""} onChange={e => setEditingTask({ ...editingTask, project_id: e.target.value })}><option value="">بدون مشروع</option>{activeProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
               <label>المكلف بالمهمة<select required value={editingTask.assignee_id || ""} onChange={e => setEditingTask({ ...editingTask, assignee_id: e.target.value })}><option value="" disabled>اختر المكلف</option>{members.map(m => <option key={m.id} value={m.id}>{m.full_name || "عضو"}</option>)}</select></label>
-              <label>تاريخ التسليم<input type="date" value={editingTask.due_date || ""} onChange={e => setEditingTask({ ...editingTask, due_date: e.target.value })} /></label>
+              <label>موعد الإنجاز<input type="date" value={editingTask.due_date || ""} onChange={e => setEditingTask({ ...editingTask, due_date: e.target.value })} /></label>
               <label>تاريخ الاستلام<input type="date" value={toDateInput(editingTask.created_at)} onChange={e => { if (e.target.value) setEditingTask({ ...editingTask, created_at: fromDateInput(e.target.value) }); }} /></label>
               <label>التنبيه قبل الموعد<select value={editingTask.remind_days} onChange={e => setEditingTask({ ...editingTask, remind_days: Number(e.target.value) })}>{[0, 1, 2, 3, 5, 7, 10, 14, 30].map(n => <option key={n} value={n}>{n} يوم</option>)}</select></label>
             </div>
@@ -2240,7 +2318,7 @@ export default function Home() {
                   {members.map(m => <option key={m.id} value={m.id}>{m.full_name || "عضو"}</option>)}
                 </select>
               </label>
-              <label>تاريخ التسليم<input type="date" value={projectTaskForm.due_date} onChange={e => setProjectTaskForm({ ...projectTaskForm, due_date: e.target.value })} /></label>
+              <label>موعد الإنجاز<input type="date" value={projectTaskForm.due_date} onChange={e => setProjectTaskForm({ ...projectTaskForm, due_date: e.target.value })} /></label>
               <label>التنبيه قبل الموعد
                 <select value={projectTaskForm.remind_days} onChange={e => setProjectTaskForm({ ...projectTaskForm, remind_days: Number(e.target.value) })}>
                   {[0, 1, 2, 3, 5, 7, 10, 14, 30].map(n => <option key={n} value={n}>{n} يوم</option>)}

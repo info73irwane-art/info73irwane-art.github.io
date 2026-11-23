@@ -343,7 +343,11 @@ class Query implements PromiseLike<Result> {
       order: this.orderBy, single: this.isSingle, returning: this.returning,
     };
     if (this.kind === "select") return select(op);
-    if (session && view && OPTIMISTIC.has(this.table)) return Promise.resolve(queueWrite(op));
+    // ترتيب المهام الخاص بالعضو يُحفظ فوراً أيضاً
+    const ownOrder = this.table === "profiles" && this.kind === "update" &&
+      Object.keys((this.values as Record<string, unknown>) || {}).join() === "task_order" &&
+      this.filters.length === 1 && this.filters[0][0] === "id" && this.filters[0][1] === session?.user.id;
+    if (session && view && (OPTIMISTIC.has(this.table) || ownOrder)) return Promise.resolve(queueWrite(op));
     return call(op);
   }
 
